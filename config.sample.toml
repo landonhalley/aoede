@@ -1,6 +1,6 @@
 DISCORD_TOKEN="the discord bot token"
-SPOTIFY_USERNAME="your spotify email"
-SPOTIFY_PASSWORD="your spotify password"
 DISCORD_USER_ID="your discord id here"
+# Optional: force Spotify autoplay on or off. Defaults to your account's setting.
 SPOTIFY_BOT_AUTOPLAY=true
+# Optional: name shown in Spotify Connect. Defaults to "Aoede".
 SPOTIFY_DEVICE_NAME="custom device name in spotify, optional"

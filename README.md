@@ -15,76 +15,75 @@ Aoede is a Discord music bot that **directly** streams from **Spotify to Discord
 
 ## 🏗 Usage
 
-(Images are available for x86 and arm64.)
-
 ### Notes:
 ⚠️ Aoede only supports bot tokens. Providing a user token won't work.
 
 Aoede will appear offline until you join a voice channel it has access it.
 
+### Logging in to Spotify
+
+Spotify no longer allows logging in with a username and password, so Aoede signs in with OAuth. You only need to do this once; the credentials are saved in the cache directory (`/data` in Docker, `./cache` otherwise, or whatever `CACHE_DIR` is set to).
+
+1. Run the login command:
+	- Docker Compose: `docker compose run --rm -it aoede login`
+	- Docker: `docker run --rm -it -v ./aoede:/data aoede login`
+	- Binary: `./aoede login`
+2. Open the printed URL and log in to Spotify.
+3. Your browser will be redirected to a `http://127.0.0.1/login?code=...` page that fails to load. That's expected: copy the full URL from the address bar and paste it into the terminal.
+
+Then start Aoede normally. If the saved credentials ever stop working, run the login command again.
+
 ### Docker Compose (recommended):
 
-There are a variety of image tags available:
-- `:0`: versions >= 0.0.0
-- `:0.5`: versions >= 0.5.0 and < 0.6.0
-- `:0.5.1`: an exact version specifier
-- `:latest`: whatever the latest version is
+Published images for this version aren't available yet, so build the image from this repository:
 
 ```yaml
-version: '3.4'
-
 services:
   aoede:
-    image: codetheweb/aoede
+    build: .
     restart: always
     volumes:
       - ./aoede:/data
     environment:
       - DISCORD_TOKEN=
-      - SPOTIFY_USERNAME=
-      - SPOTIFY_PASSWORD=
       - DISCORD_USER_ID=        # Discord user ID of the user you want Aoede to follow
-      - SPOTIFY_BOT_AUTOPLAY=   # Autoplay similar songs when your music ends (true/false)
-      - SPOTIFY_DEVICE_NAME=
+      - SPOTIFY_BOT_AUTOPLAY=   # Optional: force autoplay of similar songs on/off (true/false). Defaults to your Spotify setting
+      - SPOTIFY_DEVICE_NAME=    # Optional: name shown in Spotify Connect. Defaults to "Aoede"
 ```
 
 ### Docker:
 ```env
 # .env
 DISCORD_TOKEN=
-SPOTIFY_USERNAME=
-SPOTIFY_PASSWORD=
 DISCORD_USER_ID=
 SPOTIFY_BOT_AUTOPLAY=
 SPOTIFY_DEVICE_NAME=
 ```
 
 ```bash
-docker run --rm -d --env-file .env codetheweb/aoede
+docker build -t aoede .
+docker run --rm -d --env-file .env -v ./aoede:/data aoede
 ```
 
 ### Prebuilt Binaries:
 
-Prebuilt binaries are available on the [releases page](https://github.com/codetheweb/aoede/releases). Download the binary for your platform, then inside a terminal session:
+Prebuilt binaries for older versions are available on the [releases page](https://github.com/codetheweb/aoede/releases), but they use the old password login and no longer work. Build from source instead (see below), then inside a terminal session:
 
 1. There are two options to make configuration values available to Aoede:
 	1. Copy the `config.sample.toml` file to `config.toml` and update as necessary.
 	2. Use environment variables (see the Docker Compose section above):
 		- On Windows, you can use `setx DISCORD_TOKEN my-token`
 		- On Linux / macOS, you can use `export DISCORD_TOKEN=my-token`
-2. Run the binary:
-	- For Linux / macOS, `./platform-latest-aoede` after navigating to the correct directory
-	- For Windows, execute `windows-latest-aoede.exe` after navigating to the correct directory
+2. Log in to Spotify once with `aoede login` (see above).
+3. Run the binary.
 
 ### Building from source:
 
 Requirements:
 
-- automake
-- autoconf
 - cmake
-- libtool
-- Rust
+- A C compiler
+- Rust (latest stable)
 - Cargo
 
-Run `cargo build --release`. This will produce a binary in `target/release/aoede`. Set the required environment variables (see the Docker Compose section), then run the binary.
+Run `cargo build --release`. This will produce a binary in `target/release/aoede`. Set the required environment variables (see the Docker Compose section), log in to Spotify, then run the binary.
