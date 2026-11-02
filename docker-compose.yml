@@ -1,0 +1,16 @@
+services:
+  aoede:
+    build: .
+    image: aoede
+    restart: always
+    volumes:
+      # Spotify credentials and audio cache are stored here
+      - ./aoede:/data
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      # Discord user ID of the user you want Aoede to follow
+      - DISCORD_USER_ID=${DISCORD_USER_ID}
+      # Optional: force autoplay of similar songs on/off (true/false). Defaults to your Spotify setting
+      - SPOTIFY_BOT_AUTOPLAY=${SPOTIFY_BOT_AUTOPLAY:-}
+      # Optional: name shown in Spotify Connect. Defaults to "Aoede"
+      - SPOTIFY_DEVICE_NAME=${SPOTIFY_DEVICE_NAME:-}
