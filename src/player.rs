@@ -241,10 +241,6 @@ impl SpotifyPlayer {
         })
     }
 
-    pub fn has_credentials(&self) -> bool {
-        self.cache.credentials().is_some()
-    }
-
     pub fn event_channel(&self) -> PlayerEventChannel {
         self.player.get_player_event_channel()
     }

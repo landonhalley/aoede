@@ -22,7 +22,7 @@ Aoede will appear offline until you join a voice channel it has access it.
 
 ### Logging in to Spotify
 
-Spotify no longer allows logging in with a username and password, so Aoede signs in with OAuth. You only need to do this once; the credentials are saved in the cache directory (`/data` in Docker, `./cache` otherwise, or whatever `CACHE_DIR` is set to).
+Spotify no longer allows logging in with a username and password, so Aoede signs in with OAuth. If no credentials are saved, Aoede starts the login automatically and waits for the URL on its console. You only need to do this once; the credentials are saved in the cache directory (`/data` in Docker, `./cache` otherwise, or whatever `CACHE_DIR` is set to).
 
 1. Run the login command:
 	- Docker Compose: `docker compose run --rm -it aoede login`
@@ -32,6 +32,17 @@ Spotify no longer allows logging in with a username and password, so Aoede signs
 3. Your browser will be redirected to a `http://127.0.0.1/login?code=...` page that fails to load. That's expected: copy the full URL from the address bar and paste it into the terminal.
 
 Then start Aoede normally. If the saved credentials ever stop working, run the login command again.
+
+### Portainer
+
+A multi-arch image (amd64 and arm64) is published to `ghcr.io/landonhalley/aoede:latest`.
+
+1. In Portainer go to Stacks > Add stack > Web editor and paste in [`portainer-stack.yml`](portainer-stack.yml).
+2. Fill in `DISCORD_TOKEN` and `DISCORD_USER_ID`, then deploy.
+3. On first start Aoede waits for a Spotify login. Open Containers > aoede > Logs and open the link it prints.
+4. After logging in, copy the `http://127.0.0.1/login?code=...` URL your browser was redirected to, open Containers > aoede > Attach, paste it and press Enter.
+
+Credentials are stored in the `aoede-data` volume, so this is only needed once.
 
 ### Docker Compose (recommended):
 

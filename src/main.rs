@@ -242,6 +242,25 @@ impl EventHandler for Handler {
     }
 }
 
+/// Interactive Spotify OAuth login. Returns whether it succeeded.
+async fn run_login(cache: librespot::core::cache::Cache, cache_dir: &str) -> bool {
+    println!("Open the URL below and log in to Spotify. Your browser will then fail to load");
+    println!(
+        "a page on 127.0.0.1; copy that page's full URL from the address bar and paste it here.\n"
+    );
+    match player::login(cache).await {
+        Ok(username) => {
+            println!("\nLogged in as '{username}'. Credentials saved to '{cache_dir}'.");
+            true
+        }
+        Err(e) => {
+            println!("\nLogin failed: {e}");
+            println!("If nothing could be pasted, make sure the container has stdin_open: true and tty: true.");
+            false
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -261,18 +280,8 @@ async fn main() {
     };
 
     if env::args().nth(1).as_deref() == Some("login") {
-        println!("Open the URL below and log in to Spotify. Your browser will then fail to load");
-        println!("a page on 127.0.0.1; copy that page's full URL from the address bar and paste it here.\n");
-        match player::login(cache).await {
-            Ok(username) => {
-                println!("\nLogged in as '{username}'. Credentials saved to '{cache_dir}'.");
-                exit(0);
-            }
-            Err(e) => {
-                println!("\nLogin failed: {e}");
-                exit(1);
-            }
-        }
+        let ok = run_login(cache, &cache_dir).await;
+        exit(if ok { 0 } else { 1 });
     }
 
     let config = match Config::new() {
@@ -288,6 +297,15 @@ async fn main() {
         }
     };
 
+    if cache.credentials().is_none() {
+        println!("No Spotify credentials found in '{cache_dir}', starting login.");
+        println!("Paste the URL into this container's console: in Portainer use Containers > aoede > Attach,");
+        println!("with Docker use `docker attach <container>` (the container needs stdin_open and tty).\n");
+        if !run_login(cache.clone(), &cache_dir).await {
+            exit(1);
+        }
+    }
+
     let player = match SpotifyPlayer::new(
         cache,
         Bitrate::Bitrate320,
@@ -300,14 +318,6 @@ async fn main() {
             exit(2);
         }
     };
-
-    if !player.has_credentials() {
-        println!("No Spotify credentials found in '{cache_dir}'.");
-        println!(
-            "Log in once with `aoede login` (Docker: `docker compose run --rm -it aoede login`)."
-        );
-        exit(1);
-    }
 
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
 

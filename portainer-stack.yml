@@ -1,0 +1,26 @@
+# Paste this into Portainer: Stacks > Add stack > Web editor.
+# Fill in the values below, then deploy.
+# On first start, open Containers > aoede > Logs to get the Spotify login link,
+# then Containers > aoede > Attach to paste the URL you were redirected to.
+services:
+  aoede:
+    image: ghcr.io/landonhalley/aoede:latest
+    container_name: aoede
+    restart: unless-stopped
+    # Needed so the Spotify login URL can be pasted via Portainer's Attach console
+    stdin_open: true
+    tty: true
+    volumes:
+      # Spotify credentials and audio cache
+      - aoede-data:/data
+    environment:
+      - DISCORD_TOKEN=your-discord-bot-token
+      # Discord user ID of the user you want Aoede to follow
+      - DISCORD_USER_ID=your-discord-user-id
+      # Optional: force autoplay of similar songs on/off (true/false). Leave blank to use your Spotify setting
+      - SPOTIFY_BOT_AUTOPLAY=
+      # Optional: name shown in Spotify Connect
+      - SPOTIFY_DEVICE_NAME=Aoede
+
+volumes:
+  aoede-data:
