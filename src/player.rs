@@ -113,7 +113,7 @@ pub struct SpotifyAudio {
 impl SpotifyAudio {
     fn write_samples(buf: &mut [u8], samples: &[f32]) -> usize {
         let count = samples.len().min(buf.len() / 4);
-        for (chunk, sample) in buf.chunks_exact_mut(4).zip(&samples[..count]) {
+        for (chunk, sample) in buf.as_chunks_mut::<4>().0.iter_mut().zip(&samples[..count]) {
             chunk.copy_from_slice(&sample.to_le_bytes());
         }
         count * 4
