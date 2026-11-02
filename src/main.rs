@@ -1,17 +1,15 @@
+mod audio;
 mod config;
-mod player;
+mod soloist;
 
 use std::env;
+use std::path::PathBuf;
 use std::process::exit;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use audio::Capture;
 use config::Config;
 use figment::error::Kind::MissingField;
-use librespot::metadata::audio::UniqueFields;
-use librespot::playback::config::Bitrate;
-use librespot::playback::player::PlayerEvent;
-use player::{SpotifyPlayer, SpotifyPlayerKey};
 use serenity::{
     async_trait,
     client::{Context, EventHandler},
@@ -22,29 +20,37 @@ use serenity::{
         user::OnlineStatus,
         voice::VoiceState,
     },
-    prelude::TypeMapKey,
+    prelude::{TypeMap, TypeMapKey},
     Client,
 };
+use soloist::{Event, Soloist, SoloistConfig};
 use songbird::SerenityInit;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 const DEFAULT_CACHE_DIR: &str = "cache";
 
 struct Handler {
-    events_started: AtomicBool,
+    /// Soloist events, taken by the first `cache_ready`.
+    events: Mutex<Option<mpsc::UnboundedReceiver<Event>>>,
 }
 
-pub struct ConfigKey;
-impl TypeMapKey for ConfigKey {
-    type Value = Config;
+struct State {
+    config: Config,
+    soloist: Soloist,
+    capture: Capture,
 }
 
-async fn get_state(ctx: &Context) -> (Arc<Mutex<SpotifyPlayer>>, Config) {
-    let data = ctx.data.read().await;
-    (
-        data.get::<SpotifyPlayerKey>().unwrap().clone(),
-        data.get::<ConfigKey>().unwrap().clone(),
-    )
+struct StateKey;
+impl TypeMapKey for StateKey {
+    type Value = Arc<State>;
+}
+
+async fn state(ctx: &Context) -> Arc<State> {
+    ctx.data.read().await.get::<StateKey>().unwrap().clone()
+}
+
+fn user_id(state: &State) -> UserId {
+    UserId::new(state.config.discord_user_id)
 }
 
 /// Find the voice channel the followed user is currently in.
@@ -56,20 +62,8 @@ fn find_user_channel(ctx: &Context, user_id: UserId) -> Option<(GuildId, Channel
     })
 }
 
-async fn enable_connect(ctx: &Context, player: &Mutex<SpotifyPlayer>) {
-    ctx.online();
-    if let Err(e) = player.lock().await.enable_connect().await {
-        tracing::error!("Could not start Spotify Connect: {e}");
-    }
-}
-
 /// Join the given channel (if not already there) and stream Spotify into it.
-async fn join_and_play(
-    ctx: &Context,
-    player: &Mutex<SpotifyPlayer>,
-    guild_id: GuildId,
-    channel_id: ChannelId,
-) {
+async fn join_and_play(ctx: &Context, state: &State, guild_id: GuildId, channel_id: ChannelId) {
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialization.");
@@ -97,10 +91,9 @@ async fn join_and_play(
         }
     };
 
-    let input = player.lock().await.input();
     let mut call = call.lock().await;
     call.set_bitrate(songbird::driver::Bitrate::Auto);
-    call.play_only_input(input);
+    call.play_only_input(state.capture.input());
 }
 
 async fn leave_all(ctx: &Context) {
@@ -114,68 +107,74 @@ async fn leave_all(ctx: &Context) {
     }
 }
 
-fn track_description(item: &librespot::metadata::audio::AudioItem) -> String {
-    let artist = match &item.unique_fields {
-        UniqueFields::Track { artists, .. } => artists.first().map(|a| a.name.clone()),
-        UniqueFields::Local { artists, .. } => artists.clone(),
-        UniqueFields::Episode { show_name, .. } => Some(show_name.clone()),
-    };
-    match artist {
-        Some(artist) => format!("{}: {}", artist, item.name),
-        None => item.name.clone(),
-    }
+fn set_listening(ctx: &Context, track: Option<&String>) {
+    ctx.set_presence(
+        track.map(|t| ActivityData::listening(t.clone())),
+        OnlineStatus::Online,
+    );
 }
 
-async fn handle_player_events(ctx: Context) {
-    let (player, config) = get_state(&ctx).await;
-    let user_id = UserId::new(config.discord_user_id);
-    let mut events = player.lock().await.event_channel();
+async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver<Event>) {
+    let state = state(&ctx).await;
 
     let mut now_playing: Option<String> = None;
     let mut is_playing = false;
 
     while let Some(event) = events.recv().await {
         match event {
-            PlayerEvent::Playing { .. } => {
-                is_playing = true;
-                match find_user_channel(&ctx, user_id) {
-                    Some((guild_id, channel_id)) => {
-                        join_and_play(&ctx, &player, guild_id, channel_id).await
-                    }
-                    None => tracing::warn!("Could not find user in a voice channel."),
-                }
-                ctx.set_presence(
-                    now_playing.clone().map(ActivityData::listening),
-                    OnlineStatus::Online,
+            Event::LoggedIn(false) => {
+                tracing::warn!(
+                    "Soloist is not paired yet. Open Spotify on a device on the same network as \
+                     Aoede and select \"{}\" from the device list.",
+                    state.config.spotify_device_name
                 );
             }
+            Event::LoggedIn(true) => tracing::info!("Soloist is paired with Spotify"),
 
-            PlayerEvent::TrackChanged { audio_item } => {
-                now_playing = Some(track_description(&audio_item));
-                if is_playing {
-                    ctx.set_presence(
-                        now_playing.clone().map(ActivityData::listening),
-                        OnlineStatus::Online,
-                    );
+            Event::Status(status) => match status.as_str() {
+                "playing" => {
+                    is_playing = true;
+                    match find_user_channel(&ctx, user_id(&state)) {
+                        Some((guild_id, channel_id)) => {
+                            join_and_play(&ctx, &state, guild_id, channel_id).await;
+                            set_listening(&ctx, now_playing.as_ref());
+                        }
+                        None => {
+                            tracing::warn!("You're not in a voice channel, pausing Spotify.");
+                            state.soloist.send("pause");
+                        }
+                    }
                 }
-            }
+                "paused" => {
+                    is_playing = false;
+                    set_listening(&ctx, None);
+                }
+                "idle" => {
+                    is_playing = false;
+                    set_listening(&ctx, None);
+                    leave_all(&ctx).await;
+                }
+                _ => {}
+            },
 
-            PlayerEvent::Paused { .. } => {
+            Event::Active(false) => {
+                // Playback moved to another device.
                 is_playing = false;
-                ctx.set_presence(None, OnlineStatus::Online);
-            }
-
-            PlayerEvent::Stopped { .. } => {
-                is_playing = false;
-                ctx.set_presence(None, OnlineStatus::Online);
+                set_listening(&ctx, None);
                 leave_all(&ctx).await;
             }
+            Event::Active(true) => {}
 
-            _ => {}
+            Event::Track(track) => {
+                now_playing = Some(track);
+                if is_playing {
+                    set_listening(&ctx, now_playing.as_ref());
+                }
+            }
         }
     }
 
-    tracing::error!("Spotify player event channel closed.");
+    tracing::error!("Soloist event channel closed.");
 }
 
 #[async_trait]
@@ -186,24 +185,22 @@ impl EventHandler for Handler {
     }
 
     async fn cache_ready(&self, ctx: Context, _guilds: Vec<GuildId>) {
-        let (player, config) = get_state(&ctx).await;
+        let state = state(&ctx).await;
 
-        if !self.events_started.swap(true, Ordering::SeqCst) {
-            tokio::spawn(handle_player_events(ctx.clone()));
+        if let Some(events) = self.events.lock().await.take() {
+            tokio::spawn(handle_soloist_events(ctx.clone(), events));
         }
 
-        // Handle case when user is in VC when bot starts
-        if find_user_channel(&ctx, UserId::new(config.discord_user_id)).is_some() {
-            enable_connect(&ctx, &player).await;
-        } else {
+        // Appear offline until the followed user is in voice.
+        if find_user_channel(&ctx, user_id(&state)).is_none() {
             ctx.invisible();
         }
     }
 
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
-        let (player, config) = get_state(&ctx).await;
+        let state = state(&ctx).await;
 
-        if new.user_id != UserId::new(config.discord_user_id) {
+        if new.user_id != user_id(&state) {
             return;
         }
 
@@ -211,12 +208,12 @@ impl EventHandler for Handler {
 
         match (old_channel, new.channel_id) {
             // User joined a voice channel
-            (None, Some(_)) => enable_connect(&ctx, &player).await,
+            (None, Some(_)) => ctx.online(),
 
-            // User left voice
+            // User left voice: stop playing
             (Some(_), None) => {
                 ctx.invisible();
-                player.lock().await.disable_connect();
+                state.soloist.send("pause");
                 leave_all(&ctx).await;
             }
 
@@ -232,31 +229,12 @@ impl EventHandler for Handler {
                     .any(|guild_id| manager.get(guild_id).is_some());
 
                 if let (true, Some(guild_id)) = (in_call, new.guild_id) {
-                    join_and_play(&ctx, &player, guild_id, new_channel).await;
+                    join_and_play(&ctx, &state, guild_id, new_channel).await;
                 }
             }
 
             // Mute/deafen changes etc.
             _ => {}
-        }
-    }
-}
-
-/// Interactive Spotify OAuth login. Returns whether it succeeded.
-async fn run_login(cache: librespot::core::cache::Cache, cache_dir: &str) -> bool {
-    println!("Open the URL below and log in to Spotify. Your browser will then fail to load");
-    println!(
-        "a page on 127.0.0.1; copy that page's full URL from the address bar and paste it here.\n"
-    );
-    match player::login(cache).await {
-        Ok(username) => {
-            println!("\nLogged in as '{username}'. Credentials saved to '{cache_dir}'.");
-            true
-        }
-        Err(e) => {
-            println!("\nLogin failed: {e}");
-            println!("If nothing could be pasted, make sure the container has stdin_open: true and tty: true.");
-            false
         }
     }
 }
@@ -269,20 +247,6 @@ async fn main() {
                 .unwrap_or_else(|_| "info,serenity=warn,songbird=warn".into()),
         )
         .init();
-
-    let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| DEFAULT_CACHE_DIR.to_string());
-    let cache = match player::open_cache(&cache_dir) {
-        Ok(cache) => cache,
-        Err(e) => {
-            println!("Couldn't open cache directory '{cache_dir}': {e}");
-            exit(2);
-        }
-    };
-
-    if env::args().nth(1).as_deref() == Some("login") {
-        let ok = run_login(cache, &cache_dir).await;
-        exit(if ok { 0 } else { 1 });
-    }
 
     let config = match Config::new() {
         Ok(config) => config,
@@ -297,41 +261,58 @@ async fn main() {
         }
     };
 
-    if cache.credentials().is_none() {
-        println!("No Spotify credentials found in '{cache_dir}', starting login.");
-        println!("Paste the URL into this container's console: in Portainer use Containers > aoede > Attach,");
-        println!("with Docker use `docker attach <container>` (the container needs stdin_open and tty).\n");
-        if !run_login(cache.clone(), &cache_dir).await {
-            exit(1);
+    let cache_dir =
+        PathBuf::from(env::var("CACHE_DIR").unwrap_or_else(|_| DEFAULT_CACHE_DIR.into()));
+    let data_dir = cache_dir.join("soloist");
+    let soloist_cache_dir = cache_dir.join("soloist-cache");
+    for dir in [&data_dir, &soloist_cache_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            println!("Couldn't create '{}': {e}", dir.display());
+            exit(2);
         }
     }
 
-    let player = match SpotifyPlayer::new(
-        cache,
-        Bitrate::Bitrate320,
-        config.spotify_bot_autoplay,
-        config.spotify_device_name.clone(),
-    ) {
-        Ok(player) => player,
-        Err(e) => {
-            println!("Couldn't create Spotify player: {e}");
-            exit(2);
-        }
-    };
+    if !audio::ensure_sink(&config.pulse_sink_name) {
+        println!(
+            "Couldn't find or create the PulseAudio sink '{}'. Is PulseAudio (or PipeWire with \
+             pipewire-pulse) running, and are `pactl` and `parec` installed?",
+            config.pulse_sink_name
+        );
+        exit(2);
+    }
+    let capture = Capture::start(config.pulse_sink_name.clone());
+
+    let (soloist, events) = soloist::start(SoloistConfig {
+        path: config.soloist_path.clone(),
+        api_key: config.soloist_api_key.clone(),
+        device_name: config.spotify_device_name.clone(),
+        data_dir,
+        cache_dir: soloist_cache_dir,
+        initial_volume: config.soloist_initial_volume,
+        pulse_sink: config.pulse_sink_name.clone(),
+    });
 
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES;
+    let token = config.discord_token.clone();
 
-    let mut client = Client::builder(&config.discord_token, intents)
+    let mut data = TypeMap::new();
+    data.insert::<StateKey>(Arc::new(State {
+        config,
+        soloist,
+        capture,
+    }));
+
+    let mut client = Client::builder(&token, intents)
         .event_handler(Handler {
-            events_started: AtomicBool::new(false),
+            events: Mutex::new(Some(events)),
         })
-        .type_map_insert::<SpotifyPlayerKey>(Arc::new(Mutex::new(player)))
-        .type_map_insert::<ConfigKey>(config)
+        .type_map(data)
         .register_songbird()
         .await
         .expect("Err creating client");
 
     if let Err(why) = client.start().await {
         println!("Client ended: {why:?}");
+        exit(1);
     }
 }

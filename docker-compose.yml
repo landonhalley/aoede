@@ -2,15 +2,19 @@ services:
   aoede:
     build: .
     image: aoede
-    restart: always
+    restart: unless-stopped
+    # Host networking lets the Spotify app discover the device on your network for pairing
+    network_mode: host
     volumes:
-      # Spotify credentials and audio cache are stored here
+      # Soloist pairing, cache and the downloaded Soloist build
       - ./aoede:/data
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       # Discord user ID of the user you want Aoede to follow
       - DISCORD_USER_ID=${DISCORD_USER_ID}
-      # Optional: force autoplay of similar songs on/off (true/false). Defaults to your Spotify setting
-      - SPOTIFY_BOT_AUTOPLAY=${SPOTIFY_BOT_AUTOPLAY:-}
+      # Spotify Soloist API key from https://developer.spotify.com/dashboard/soloist
+      - SOLOIST_API_KEY=${SOLOIST_API_KEY}
       # Optional: name shown in Spotify Connect. Defaults to "Aoede"
       - SPOTIFY_DEVICE_NAME=${SPOTIFY_DEVICE_NAME:-}
+      # Optional: initial Spotify volume (0-100)
+      - SOLOIST_INITIAL_VOLUME=${SOLOIST_INITIAL_VOLUME:-}

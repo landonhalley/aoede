@@ -1,17 +1,12 @@
-FROM rust:alpine AS dependencies
+FROM rust:trixie AS dependencies
 
-RUN apk add --no-cache alpine-sdk cmake
-RUN cargo install cargo-chef
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
+RUN cargo install cargo-chef --locked
 
 FROM dependencies AS planner
 WORKDIR /app
-
-# We only pay the installation cost once,
-# it will be cached from the second build onwards
-# To ensure a reproducible build consider pinning
-# the cargo-chef version with `--version X.X.X`
 COPY . .
-RUN cargo chef prepare  --recipe-path recipe.json
+RUN cargo chef prepare --recipe-path recipe.json
 
 FROM dependencies AS cacher
 WORKDIR /app
@@ -21,15 +16,23 @@ RUN cargo chef cook --release --recipe-path recipe.json
 FROM dependencies AS builder
 WORKDIR /app
 COPY . .
-# Copy over the cached dependencies
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 RUN cargo build --release --bin aoede
 
-FROM alpine AS runtime
-WORKDIR /app
-COPY --from=builder /app/target/release/aoede /usr/local/bin
+FROM debian:trixie-slim AS runtime
+
+# Soloist needs glibc and libatomic, plays through PulseAudio, and Aoede
+# records it with parec. Soloist itself is downloaded at startup, since
+# Spotify doesn't allow redistributing it and builds expire after 90 days.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl libatomic1 libpulse0 pulseaudio pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/aoede /usr/local/bin/aoede
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENV CACHE_DIR=/data
 
-ENTRYPOINT ["/usr/local/bin/aoede"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

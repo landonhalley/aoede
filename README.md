@@ -4,7 +4,9 @@
 
 Aoede is a Discord music bot that **directly** streams from **Spotify to Discord**. The only interface is Spotify itself.
 
-**Note**: a Spotify Premium account is currently required. This is a limitation of librespot, the Spotify library Aoede uses. Facebook logins [are not supported](https://github.com/librespot-org/librespot/discussions/635).
+Aoede plays through [Spotify Soloist](https://developer.spotify.com/documentation/soloist), Spotify's official headless Spotify Connect player. Earlier versions used librespot, which Spotify has been [locking out](https://github.com/librespot-org/librespot/issues/1649).
+
+**Note**: setting up Soloist requires a Spotify Premium account and a free Spotify for Developers account.
 
 ![Demo](https://raw.githubusercontent.com/codetheweb/aoede/main/.github/demo.gif)
 
@@ -18,77 +20,76 @@ Aoede is a Discord music bot that **directly** streams from **Spotify to Discord
 ### Notes:
 ⚠️ Aoede only supports bot tokens. Providing a user token won't work.
 
-Aoede will appear offline until you join a voice channel it has access it.
+Aoede will appear offline until you join a voice channel it has access to. It plays while you're in voice and pauses Spotify when you leave.
 
-### Logging in to Spotify
+### 1. Get a Soloist API key
 
-Spotify no longer allows logging in with a username and password, so Aoede signs in with OAuth. If no credentials are saved, Aoede starts the login automatically and waits for the URL on its console. You only need to do this once; the credentials are saved in the cache directory (`/data` in Docker, `./cache` otherwise, or whatever `CACHE_DIR` is set to).
+1. Sign in to the [Spotify for Developers dashboard](https://developer.spotify.com/dashboard) with your Premium account.
+2. Open the [Spotify Soloist API Key](https://developer.spotify.com/dashboard/soloist) page and generate a key.
+3. Keep it secret: it belongs to your account. Aoede needs it as `SOLOIST_API_KEY`.
 
-1. Run the login command:
-	- Docker Compose: `docker compose run --rm -it aoede login`
-	- Docker: `docker run --rm -it -v ./aoede:/data aoede login` (after `docker build -t aoede .`)
-	- Binary: `./aoede login`
-2. Open the printed URL and log in to Spotify.
-3. Your browser will be redirected to a `http://127.0.0.1/login?code=...` page that fails to load. That's expected: copy the full URL from the address bar and paste it into the terminal.
+### 2. Pair with Spotify (first start only)
 
-Then start Aoede normally. If the saved credentials ever stop working, run the login command again.
+On its first start Aoede waits to be paired. Open Spotify on a phone or computer **on the same network** as the machine running Aoede, open the device picker and select **Aoede** (or your `SPOTIFY_DEVICE_NAME`). Soloist saves the session in the data volume, so this only happens once. After that, select Aoede in Spotify whenever you're in a voice channel.
+
+Pairing uses local network discovery, which is why the Docker examples use `network_mode: host`.
 
 ### Portainer
 
 A multi-arch image (amd64 and arm64) is published to `ghcr.io/landonhalley/aoede:latest`.
 
 1. In Portainer go to Stacks > Add stack > Web editor and paste in [`portainer-stack.yml`](portainer-stack.yml).
-2. Fill in `DISCORD_TOKEN` and `DISCORD_USER_ID`, then deploy.
-3. On first start Aoede waits for a Spotify login. Open Containers > aoede > Logs and open the link it prints.
-4. After logging in, copy the `http://127.0.0.1/login?code=...` URL your browser was redirected to, open Containers > aoede > Attach, paste it and press Enter.
+2. Fill in `DISCORD_TOKEN`, `DISCORD_USER_ID` and `SOLOIST_API_KEY`, then deploy.
+3. Pair it from the Spotify app (see above). The container logs say when it's waiting.
 
-Credentials are stored in the `aoede-data` volume, so this is only needed once.
+To update, use "Pull and redeploy". Restarting the container also downloads the latest Soloist build.
 
-### Docker Compose (recommended):
+### Docker Compose
 
 1. Clone this repository and create a `.env` file next to `docker-compose.yml`:
 	```env
 	DISCORD_TOKEN=
 	# Discord user ID of the user you want Aoede to follow
 	DISCORD_USER_ID=
-	# Optional: force autoplay of similar songs on/off (true/false). Defaults to your Spotify setting
-	SPOTIFY_BOT_AUTOPLAY=
+	# Spotify Soloist API key
+	SOLOIST_API_KEY=
 	# Optional: name shown in Spotify Connect. Defaults to "Aoede"
 	SPOTIFY_DEVICE_NAME=
 	```
-2. Build the image: `docker compose build`
-3. Log in to Spotify once: `docker compose run --rm -it aoede login`
-4. Start Aoede: `docker compose up -d`
+2. Start it: `docker compose up -d --build`
+3. Pair it from the Spotify app (see above).
 
-Spotify credentials and the audio cache are stored in `./aoede`.
+Pairing, cache and the downloaded Soloist build are stored in `./aoede`.
 
-### Docker:
+### Docker
 
 ```bash
 docker build -t aoede .
-docker run --rm -it -v ./aoede:/data aoede login
-docker run -d --restart always --env-file .env -v ./aoede:/data aoede
+docker run -d --restart unless-stopped --network host --env-file .env -v ./aoede:/data aoede
 ```
 
-### Prebuilt Binaries:
+### Configuration
 
-Prebuilt binaries for older versions are available on the [releases page](https://github.com/codetheweb/aoede/releases), but they use the old password login and no longer work. Build from source instead (see below), then inside a terminal session:
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | yes | Discord bot token |
+| `DISCORD_USER_ID` | yes | Discord user ID of the user Aoede follows |
+| `SOLOIST_API_KEY` | yes | Spotify Soloist API key |
+| `SPOTIFY_DEVICE_NAME` | no | Spotify Connect device name (default `Aoede`) |
+| `SOLOIST_INITIAL_VOLUME` | no | Initial Spotify volume, 0-100 |
+| `CACHE_DIR` | no | Data directory (`/data` in Docker, `./cache` otherwise) |
+| `SOLOIST_PATH` | no | Path to the `soloist` executable (set automatically in Docker) |
+| `PULSE_SINK_NAME` | no | PulseAudio sink used to capture audio (default `aoede`) |
 
-1. There are two options to make configuration values available to Aoede:
-	1. Copy the `config.sample.toml` file to `config.toml` and update as necessary.
-	2. Use environment variables (see the Docker Compose section above):
-		- On Windows, you can use `setx DISCORD_TOKEN my-token`
-		- On Linux / macOS, you can use `export DISCORD_TOKEN=my-token`
-2. Log in to Spotify once with `aoede login` (see above).
-3. Run the binary.
+### Running without Docker
 
-### Building from source:
+Linux only. You need:
 
-Requirements:
+- Soloist from the [getting started guide](https://developer.spotify.com/documentation/soloist/tutorials/getting-started) on your `PATH` (or set `SOLOIST_PATH`). Builds expire after 90 days, so download a new one when it tells you to.
+- PulseAudio, or PipeWire with `pipewire-pulse`, plus `pactl` and `parec` (`pulseaudio-utils`).
 
-- cmake
-- A C compiler
-- Rust (latest stable)
-- Cargo
+Aoede creates an `aoede` null sink and routes only Soloist into it, so your normal audio output isn't affected. Configure it with `config.toml` (see `config.sample.toml`) or environment variables, then run `cargo run --release`.
 
-Run `cargo build --release`. This will produce a binary in `target/release/aoede`. Set the required environment variables (see the Docker Compose section), log in to Spotify, then run the binary.
+### Building from source
+
+Requirements: Rust (latest stable), Cargo, cmake and a C compiler. Run `cargo build --release`.
