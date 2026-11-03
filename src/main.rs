@@ -6,6 +6,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::Arc;
+use std::time::Duration;
 
 use audio::Capture;
 use config::Config;
@@ -28,6 +29,11 @@ use songbird::SerenityInit;
 use tokio::sync::{mpsc, Mutex};
 
 const DEFAULT_CACHE_DIR: &str = "cache";
+/// How many times to try joining a voice channel before giving up.
+const JOIN_ATTEMPTS: u32 = 3;
+/// Time for Discord to process a leave before rejoining. Rejoining sooner lets the
+/// leave's voice state update cancel the new connection attempt.
+const REJOIN_DELAY: Duration = Duration::from_millis(1500);
 
 struct Handler {
     /// Soloist events, taken by the first `cache_ready`.
@@ -38,6 +44,8 @@ struct State {
     config: Config,
     soloist: Soloist,
     capture: Capture,
+    /// Serializes joining and leaving voice. Overlapping joins cancel each other in songbird.
+    voice: Mutex<()>,
 }
 
 struct StateKey;
@@ -64,6 +72,7 @@ fn find_user_channel(ctx: &Context, user_id: UserId) -> Option<(GuildId, Channel
 
 /// Join the given channel (if not already there) and stream Spotify into it.
 async fn join_and_play(ctx: &Context, state: &State, guild_id: GuildId, channel_id: ChannelId) {
+    let _voice = state.voice.lock().await;
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialization.");
@@ -75,28 +84,44 @@ async fn join_and_play(ctx: &Context, state: &State, guild_id: GuildId, channel_
         }
     }
 
-    // Calls are removed whenever playback stops, so an existing call in this
-    // channel is already streaming.
-    if let Some(call) = manager.get(guild_id) {
-        if call.lock().await.current_channel() == Some(channel_id.into()) {
-            return;
+    for attempt in 1..=JOIN_ATTEMPTS {
+        if let Some(call) = manager.get(guild_id) {
+            let connected = {
+                let call = call.lock().await;
+                call.current_connection().is_some()
+                    && call.current_channel() == Some(channel_id.into())
+            };
+            // Calls are removed whenever playback stops, so a completed connection
+            // to this channel is already streaming.
+            if connected {
+                return;
+            }
+            // A half-finished or failed attempt: start from a clean slate, and give
+            // Discord time to process the leave so it doesn't cancel the next join.
+            let _ = manager.remove(guild_id).await;
+            tokio::time::sleep(REJOIN_DELAY).await;
+        }
+
+        match manager.join(guild_id, channel_id).await {
+            Ok(call) => {
+                let mut call = call.lock().await;
+                call.set_bitrate(songbird::driver::Bitrate::Auto);
+                call.play_only_input(state.capture.input());
+                tracing::info!("Joined voice channel {channel_id}");
+                return;
+            }
+            Err(e) => tracing::warn!(
+                "Could not join voice channel (attempt {attempt}/{JOIN_ATTEMPTS}): {e}"
+            ),
         }
     }
 
-    let call = match manager.join(guild_id, channel_id).await {
-        Ok(call) => call,
-        Err(e) => {
-            tracing::error!("Could not join voice channel: {e}");
-            return;
-        }
-    };
-
-    let mut call = call.lock().await;
-    call.set_bitrate(songbird::driver::Bitrate::Auto);
-    call.play_only_input(state.capture.input());
+    tracing::error!("Giving up joining voice channel {channel_id}");
+    let _ = manager.remove(guild_id).await;
 }
 
-async fn leave_all(ctx: &Context) {
+async fn leave_all(ctx: &Context, state: &State) {
+    let _voice = state.voice.lock().await;
     let manager = songbird::get(ctx)
         .await
         .expect("Songbird Voice client placed in at initialization.");
@@ -152,7 +177,7 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
                 "idle" => {
                     is_playing = false;
                     set_listening(&ctx, None);
-                    leave_all(&ctx).await;
+                    leave_all(&ctx, &state).await;
                 }
                 _ => {}
             },
@@ -161,7 +186,7 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
                 // Playback moved to another device.
                 is_playing = false;
                 set_listening(&ctx, None);
-                leave_all(&ctx).await;
+                leave_all(&ctx, &state).await;
             }
             Event::Active(true) => {}
 
@@ -200,6 +225,13 @@ impl EventHandler for Handler {
     async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
         let state = state(&ctx).await;
 
+        if new.user_id == ctx.cache.current_user().id {
+            tracing::info!(
+                "Bot voice state: channel {:?}",
+                new.channel_id.map(|c| c.get())
+            );
+            return;
+        }
         if new.user_id != user_id(&state) {
             return;
         }
@@ -214,7 +246,7 @@ impl EventHandler for Handler {
             (Some(_), None) => {
                 ctx.invisible();
                 state.soloist.send("pause");
-                leave_all(&ctx).await;
+                leave_all(&ctx, &state).await;
             }
 
             // User moved channels: follow them if we're currently streaming
@@ -300,6 +332,7 @@ async fn main() {
         config,
         soloist,
         capture,
+        voice: Mutex::new(()),
     }));
 
     let mut client = Client::builder(&token, intents)
