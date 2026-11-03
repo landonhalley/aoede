@@ -233,6 +233,24 @@ mod tests {
         assert!(buf[..read].iter().all(|&b| b == 0));
     }
 
+    /// songbird must be able to decode the raw f32 stream we hand it. This fails
+    /// if symphonia's PCM decoder isn't enabled ("no compatible track found").
+    #[tokio::test]
+    async fn songbird_can_decode_the_stream() {
+        let (channel, audio) = audio_pair();
+        for _ in 0..4 {
+            channel.sender.send(vec![0.25; CHUNK_SAMPLES]).unwrap();
+        }
+        let input: Input = RawAdapter::new(audio, SAMPLE_RATE, CHANNELS).into();
+        let playable = input
+            .make_playable_async(
+                songbird::input::codecs::get_codec_registry(),
+                songbird::input::codecs::get_probe(),
+            )
+            .await;
+        assert!(playable.is_ok(), "{:?}", playable.err());
+    }
+
     #[test]
     fn rejects_buffers_smaller_than_a_sample() {
         let (_channel, mut audio) = audio_pair();

@@ -25,8 +25,9 @@ use serenity::{
     Client,
 };
 use soloist::{Event, Soloist, SoloistConfig};
-use songbird::SerenityInit;
+use songbird::{tracks::TrackHandle, SerenityInit};
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::Instant;
 
 const DEFAULT_CACHE_DIR: &str = "cache";
 /// How many times to try joining a voice channel before giving up.
@@ -34,6 +35,8 @@ const JOIN_ATTEMPTS: u32 = 3;
 /// Time for Discord to process a leave before rejoining. Rejoining sooner lets the
 /// leave's voice state update cancel the new connection attempt.
 const REJOIN_DELAY: Duration = Duration::from_millis(1500);
+/// How long playback must stay stopped before leaving voice.
+const LEAVE_DELAY: Duration = Duration::from_secs(10);
 
 struct Handler {
     /// Soloist events, taken by the first `cache_ready`.
@@ -46,6 +49,8 @@ struct State {
     capture: Capture,
     /// Serializes joining and leaving voice. Overlapping joins cancel each other in songbird.
     voice: Mutex<()>,
+    /// The audio track currently streaming to Discord.
+    track: Mutex<Option<TrackHandle>>,
 }
 
 struct StateKey;
@@ -94,6 +99,16 @@ async fn join_and_play(ctx: &Context, state: &State, guild_id: GuildId, channel_
             // Calls are removed whenever playback stops, so a completed connection
             // to this channel is already streaming.
             if connected {
+                // Restart the stream if the track ended or errored.
+                let alive = match state.track.lock().await.as_ref() {
+                    Some(track) => track.get_info().await.is_ok(),
+                    None => false,
+                };
+                if !alive {
+                    tracing::info!("Restarting audio stream");
+                    let mut call = call.lock().await;
+                    *state.track.lock().await = Some(call.play_only_input(state.capture.input()));
+                }
                 return;
             }
             // A half-finished or failed attempt: start from a clean slate, and give
@@ -106,7 +121,7 @@ async fn join_and_play(ctx: &Context, state: &State, guild_id: GuildId, channel_
             Ok(call) => {
                 let mut call = call.lock().await;
                 call.set_bitrate(songbird::driver::Bitrate::Auto);
-                call.play_only_input(state.capture.input());
+                *state.track.lock().await = Some(call.play_only_input(state.capture.input()));
                 tracing::info!("Joined voice channel {channel_id}");
                 return;
             }
@@ -144,8 +159,25 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
 
     let mut now_playing: Option<String> = None;
     let mut is_playing = false;
+    // Soloist briefly reports idle/inactive while switching tracks or taking over
+    // playback, so leaving voice waits to see if playback really stopped.
+    let mut leave_at: Option<Instant> = None;
 
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+            () = sleep_until_or_forever(leave_at) => {
+                leave_at = None;
+                tracing::info!("Playback stopped, leaving voice");
+                leave_all(&ctx, &state).await;
+                continue;
+            }
+        };
+        tracing::debug!("Soloist event: {event:?}");
+
         match event {
             Event::LoggedIn(false) => {
                 tracing::warn!(
@@ -159,6 +191,7 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
             Event::Status(status) => match status.as_str() {
                 "playing" => {
                     is_playing = true;
+                    leave_at = None;
                     match find_user_channel(&ctx, user_id(&state)) {
                         Some((guild_id, channel_id)) => {
                             join_and_play(&ctx, &state, guild_id, channel_id).await;
@@ -177,16 +210,16 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
                 "idle" => {
                     is_playing = false;
                     set_listening(&ctx, None);
-                    leave_all(&ctx, &state).await;
+                    leave_at.get_or_insert(Instant::now() + LEAVE_DELAY);
                 }
                 _ => {}
             },
 
             Event::Active(false) => {
-                // Playback moved to another device.
+                // Playback may have moved to another device.
                 is_playing = false;
                 set_listening(&ctx, None);
-                leave_all(&ctx, &state).await;
+                leave_at.get_or_insert(Instant::now() + LEAVE_DELAY);
             }
             Event::Active(true) => {}
 
@@ -200,6 +233,13 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
     }
 
     tracing::error!("Soloist event channel closed.");
+}
+
+async fn sleep_until_or_forever(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[async_trait]
@@ -333,6 +373,7 @@ async fn main() {
         soloist,
         capture,
         voice: Mutex::new(()),
+        track: Mutex::new(None),
     }));
 
     let mut client = Client::builder(&token, intents)
