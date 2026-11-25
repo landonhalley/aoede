@@ -5,6 +5,7 @@ mod soloist;
 use std::env;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,9 @@ struct State {
     voice: Mutex<()>,
     /// The audio track currently streaming to Discord.
     track: Mutex<Option<TrackHandle>>,
+    /// Whether Aoede is the active Spotify Connect device. Soloist also reports what
+    /// the account plays on other devices, which Aoede must leave alone.
+    active: AtomicBool,
 }
 
 struct StateKey;
@@ -154,11 +158,27 @@ fn set_listening(ctx: &Context, track: Option<&String>) {
     );
 }
 
+/// Aoede is the active device and Spotify is playing: stream to the followed user.
+async fn start_streaming(ctx: &Context, state: &State, now_playing: Option<&String>) {
+    match find_user_channel(ctx, user_id(state)) {
+        Some((guild_id, channel_id)) => {
+            join_and_play(ctx, state, guild_id, channel_id).await;
+            set_listening(ctx, now_playing);
+        }
+        None => {
+            tracing::warn!("You're not in a voice channel, pausing playback on Aoede.");
+            state.soloist.send("pause");
+        }
+    }
+}
+
 async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver<Event>) {
     let state = state(&ctx).await;
 
     let mut now_playing: Option<String> = None;
-    let mut is_playing = false;
+    // Soloist's playback status, which can describe another device's playback.
+    let mut status_playing = false;
+    let mut active = false;
     // Soloist briefly reports idle/inactive while switching tracks or taking over
     // playback, so leaving voice waits to see if playback really stopped.
     let mut leave_at: Option<Instant> = None;
@@ -188,44 +208,39 @@ async fn handle_soloist_events(ctx: Context, mut events: mpsc::UnboundedReceiver
             }
             Event::LoggedIn(true) => tracing::info!("Soloist is paired with Spotify"),
 
-            Event::Status(status) => match status.as_str() {
-                "playing" => {
-                    is_playing = true;
-                    leave_at = None;
-                    match find_user_channel(&ctx, user_id(&state)) {
-                        Some((guild_id, channel_id)) => {
-                            join_and_play(&ctx, &state, guild_id, channel_id).await;
-                            set_listening(&ctx, now_playing.as_ref());
-                        }
-                        None => {
-                            tracing::warn!("You're not in a voice channel, pausing Spotify.");
-                            state.soloist.send("pause");
-                        }
+            Event::Status(status) => {
+                status_playing = status == "playing";
+                match status.as_str() {
+                    "playing" if active => {
+                        leave_at = None;
+                        start_streaming(&ctx, &state, now_playing.as_ref()).await;
                     }
+                    "paused" if active => set_listening(&ctx, None),
+                    "idle" if active => {
+                        set_listening(&ctx, None);
+                        leave_at.get_or_insert(Instant::now() + LEAVE_DELAY);
+                    }
+                    _ => {}
                 }
-                "paused" => {
-                    is_playing = false;
-                    set_listening(&ctx, None);
-                }
-                "idle" => {
-                    is_playing = false;
+            }
+
+            Event::Active(is_active) => {
+                let was_active = active;
+                active = is_active;
+                state.active.store(is_active, Ordering::Relaxed);
+                if is_active && !was_active && status_playing {
+                    leave_at = None;
+                    start_streaming(&ctx, &state, now_playing.as_ref()).await;
+                } else if !is_active && was_active {
+                    // Playback moved to another device.
                     set_listening(&ctx, None);
                     leave_at.get_or_insert(Instant::now() + LEAVE_DELAY);
                 }
-                _ => {}
-            },
-
-            Event::Active(false) => {
-                // Playback may have moved to another device.
-                is_playing = false;
-                set_listening(&ctx, None);
-                leave_at.get_or_insert(Instant::now() + LEAVE_DELAY);
             }
-            Event::Active(true) => {}
 
             Event::Track(track) => {
                 now_playing = Some(track);
-                if is_playing {
+                if active && status_playing {
                     set_listening(&ctx, now_playing.as_ref());
                 }
             }
@@ -285,7 +300,10 @@ impl EventHandler for Handler {
             // User left voice: stop playing
             (Some(_), None) => {
                 ctx.invisible();
-                state.soloist.send("pause");
+                // Only stop playback that is actually on Aoede.
+                if state.active.load(Ordering::Relaxed) {
+                    state.soloist.send("pause");
+                }
                 leave_all(&ctx, &state).await;
             }
 
@@ -374,6 +392,7 @@ async fn main() {
         capture,
         voice: Mutex::new(()),
         track: Mutex::new(None),
+        active: AtomicBool::new(false),
     }));
 
     let mut client = Client::builder(&token, intents)
