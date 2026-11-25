@@ -1,0 +1,52 @@
+#!/bin/bash
+# Start Aoede on Pterodactyl / Pelican: download the latest Aoede build from GitHub
+# if a newer one is available, then start PulseAudio, Soloist and Aoede.
+set -u
+cd /home/container || exit 1
+
+REPO="${GITHUB_REPO:-landonhalley/aoede}"
+BASE_URL="https://github.com/${REPO}/releases/download/latest"
+case "$(uname -m)" in
+    x86_64) ARCH=x86_64 ;;
+    aarch64 | arm64) ARCH=aarch64 ;;
+    *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+update_aoede() {
+    local remote local_version
+    if ! remote="$(curl --fail --silent --show-error --location "${BASE_URL}/version.txt")"; then
+        echo "Couldn't check for Aoede updates." >&2
+        return
+    fi
+    remote="$(echo "${remote}" | tr -d '[:space:]')"
+    local_version="$(cat .aoede-version 2>/dev/null || true)"
+
+    if [ -x ./aoede ] && [ "${remote}" = "${local_version}" ]; then
+        echo "Aoede is up to date (${remote:0:7})."
+        return
+    fi
+
+    echo "Downloading Aoede ${remote:0:7}..."
+    if curl --fail --silent --show-error --location \
+            "${BASE_URL}/aoede-linux-${ARCH}" -o ./aoede.new \
+        && chmod +x ./aoede.new && mv ./aoede.new ./aoede; then
+        echo "${remote}" > .aoede-version
+    else
+        rm -f ./aoede.new
+        echo "Couldn't download Aoede, keeping the current version." >&2
+    fi
+}
+
+case "${AUTO_UPDATE:-1}" in
+    0 | false | no) [ -x ./aoede ] || update_aoede ;;
+    *) update_aoede ;;
+esac
+
+if [ ! -x ./aoede ]; then
+    echo "Aoede is not installed and couldn't be downloaded." >&2
+    exit 1
+fi
+
+export CACHE_DIR="${CACHE_DIR:-/home/container/data}"
+export AOEDE_BIN=/home/container/aoede
+exec /usr/local/bin/docker-entrypoint.sh

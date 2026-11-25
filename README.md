@@ -44,6 +44,24 @@ A multi-arch image (amd64 and arm64) is published to `ghcr.io/landonhalley/aoede
 
 To update, use "Pull and redeploy". Restarting the container also downloads the latest Soloist build.
 
+### Pterodactyl / Pelican
+
+Eggs for both panels are in [`eggs/`](eggs): [`egg-pterodactyl-aoede.json`](eggs/egg-pterodactyl-aoede.json) for Pterodactyl and [`egg-aoede.yaml`](eggs/egg-aoede.yaml) for Pelican. On every start the server checks this repository's [`latest` release](https://github.com/landonhalley/aoede/releases/tag/latest) and downloads a newer Aoede build if there is one (turn this off with the **Auto Update** variable), then downloads the current Soloist build.
+
+1. Import the egg (Pterodactyl: Admin > Nests > Import Egg; Pelican: Eggs > Import).
+2. Create a server with it and fill in **Discord Bot Token**, **Discord User ID** and **Soloist API Key**. Aoede doesn't use the server's port, so any allocation works.
+3. Pair it with Spotify (see below), then start the server.
+
+**Pairing on a panel:** panels run servers on an isolated Docker network, so the Spotify app usually can't discover Aoede on your network. If Aoede shows up in Spotify's device list anyway, select it there and you're done. Otherwise pair Soloist on another computer and upload the result:
+
+1. Download Soloist for your computer from the [getting started guide](https://developer.spotify.com/documentation/soloist/tutorials/getting-started).
+2. Run it once in pairing mode, using the same device name and API key as the server:
+	```bash
+	soloist --pair --device-name "Aoede" --api-key "YOUR_SOLOIST_API_KEY" --data-dir aoede-pairing
+	```
+3. Select the device in the Spotify app on the same network. Soloist saves the session and exits.
+4. Stop the server, upload the contents of the `aoede-pairing` folder into the server's `data/soloist/` folder (replacing what's there), and start the server again.
+
 ### Docker Compose
 
 1. Clone this repository and create a `.env` file next to `docker-compose.yml`:

@@ -33,8 +33,8 @@ export SOLOIST_PATH="$BIN_DIR/soloist"
 "$SOLOIST_PATH" --version
 
 # Headless PulseAudio with a null sink that Soloist plays into and Aoede records from.
-export XDG_RUNTIME_DIR=/tmp/aoede-runtime
-mkdir -p "$XDG_RUNTIME_DIR"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/aoede-runtime-$(id -u)}"
+mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 SINK="${PULSE_SINK_NAME:-aoede}"
 pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit --use-pid-file=no \
     --log-target=stderr -n \
@@ -42,4 +42,4 @@ pulseaudio --daemonize=yes --exit-idle-time=-1 --disallow-exit --use-pid-file=no
     -L "module-native-protocol-unix auth-anonymous=1" \
     -L "module-always-sink"
 
-exec /usr/local/bin/aoede "$@"
+exec "${AOEDE_BIN:-/usr/local/bin/aoede}" "$@"

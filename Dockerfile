@@ -20,6 +20,28 @@ COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 RUN cargo build --release --bin aoede
 
+# Image for Pterodactyl / Pelican eggs. Aoede itself is downloaded from GitHub
+# releases on each start (see panel/aoede-panel-start), so it's not included here.
+FROM debian:trixie-slim AS panel
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl libatomic1 libpulse0 pulseaudio pulseaudio-utils tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -d /home/container -s /bin/bash container
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY panel/aoede-panel-start /usr/local/bin/aoede-panel-start
+COPY panel/entrypoint.sh /entrypoint.sh
+
+USER container
+ENV USER=container HOME=/home/container
+WORKDIR /home/container
+STOPSIGNAL SIGINT
+
+ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
+CMD ["/entrypoint.sh"]
+
 FROM debian:trixie-slim AS runtime
 
 # Soloist needs glibc and libatomic, plays through PulseAudio, and Aoede
